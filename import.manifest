@@ -1,0 +1,56 @@
+[apt]
+boto = python-boto
+cloudfiles = python-rackspace-cloudfiles
+cloudservers = python-rackspace-cloudservers
+cloudstack = python-cloudstack
+gevent = python-gevent
+m2crypto = python-m2crypto
+novaclient = python-novaclient
+pexpect = python-pexpect
+prettytable = python-prettytable
+pymongo = python-pymongo
+pymysql = python-pymysql
+pysnmp = python-pysnmp4, python-pysnmp4-mibs
+yaml = python-yaml
+
+
+[yum]
+boto = python-boto
+cloudfiles = python-cloudfiles
+cloudservers = python-cloudservers
+cloudstack = python-cloudstack
+gevent = python-gevent
+m2crypto = m2crypto
+novaclient = python-novaclient
+pexpect = pexpect
+prettytable = python-prettytable
+pymongo = python-pymongo
+pymysql = python-pymysql
+pysnmp = pysnmp, python-pyasn1, python-pysnmp-mibs
+yaml = PyYAML
+
+
+[yum:el5]
+boto = python26-boto
+cloudfiles = python26-cloudfiles
+cloudservers = python26-cloudservers
+cloudstack = python26-cloudstack
+gevent = python26-gevent
+m2crypto = python26-m2crypto
+novaclient = python26-novaclient
+pexpect = python26-pexpect
+prettytable = python26-prettytable
+pymongo = python26-pymongo
+pymysql = python26-pymysql
+pysnmp = python26-pysnmp, python26-pysnmp-mibs
+yaml = pythn26-pyyaml
+
+
+[apt:ubuntu8.04]
+json = python-simplejson
+gevent = python25-gevent
+
+
+
+
+
