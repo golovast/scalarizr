@@ -54,9 +54,9 @@ class RedisAPI(object):
 			raise AssertionError('Number of ports must be equal to number of passwords')
 		if num and ports and num != len(ports):
 				raise AssertionError('When ports range is passed its length must be equal to num parameter')
-		if not self.is_replication_master:
+		if not self.is_replication_main:
 			if not passwords or not ports:
-				raise AssertionError('ports and passwords are required to launch processes on redis slave')
+				raise AssertionError('ports and passwords are required to launch processes on redis subordinate')
 		available_ports = self.available_ports
 		if num > len(available_ports):
 			raise AssertionError('Cannot launch %s new processes: Ports available: %s' % (num, str(available_ports)))
@@ -109,7 +109,7 @@ class RedisAPI(object):
 		
 	def _launch(self, ports=[], passwords=[], op=None):
 		LOG.debug('Launching redis processes on ports %s with passwords %s' % (ports, passwords))
-		is_replication_master = self.is_replication_master
+		is_replication_main = self.is_replication_main
 		
 		primary_ip = self.get_primary_ip()
 		assert primary_ip is not None
@@ -123,7 +123,7 @@ class RedisAPI(object):
 		
 		for port,password in zip(ports, passwords or [None for port in ports]):
 			if op:
-				op.step('Launch Redis %s on port %s' % ('Master' if is_replication_master else 'Slave', port))
+				op.step('Launch Redis %s on port %s' % ('Main' if is_replication_main else 'Subordinate', port))
 			try:
 				if op:
 					op.__enter__()
@@ -132,14 +132,14 @@ class RedisAPI(object):
 					iptables.insert_rule(None, RuleSpec(dport=port, jump='ACCEPT', protocol=P_TCP))
 
 				redis_service.create_redis_conf_copy(port)
-				redis_process = redis_service.Redis(is_replication_master, self.persistence_type, port, password)
+				redis_process = redis_service.Redis(is_replication_main, self.persistence_type, port, password)
 				
 				if not redis_process.service.running:
-					LOG.debug('Launch Redis %s on port %s' % ('Master' if is_replication_master else 'Slave', port))
-					if is_replication_master:
-						current_password = redis_process.init_master(STORAGE_PATH)  
+					LOG.debug('Launch Redis %s on port %s' % ('Main' if is_replication_main else 'Subordinate', port))
+					if is_replication_main:
+						current_password = redis_process.init_main(STORAGE_PATH)  
 					else: 
-						current_password = redis_process.init_slave(STORAGE_PATH, primary_ip, port)
+						current_password = redis_process.init_subordinate(STORAGE_PATH, primary_ip, port)
 					new_passwords.append(current_password)
 					new_ports.append(port)
 					LOG.debug('Redis process has been launched on port %s with password %s' % (port, current_password))
@@ -158,11 +158,11 @@ class RedisAPI(object):
 		
 	
 	def _shutdown(self, ports, remove_data=False, op=None):
-		is_replication_master = self.is_replication_master
+		is_replication_main = self.is_replication_main
 		freed_ports = []
 		for port in ports:
 			if op:
-				op.step('Shutdown Redis %s on port %s' ('Master' if is_replication_master else 'Slave', port))
+				op.step('Shutdown Redis %s on port %s' ('Main' if is_replication_main else 'Subordinate', port))
 			try:
 				if op:
 					op.__enter__()
@@ -245,12 +245,12 @@ class RedisAPI(object):
 								
 		
 	@property
-	def is_replication_master(self):
+	def is_replication_main(self):
 		value = 0
 		if self._cnf.rawini.has_section(CNF_SECTION) and self._cnf.rawini.has_option(CNF_SECTION, OPT_REPLICATION_MASTER):
 			value = self._cnf.rawini.get(CNF_SECTION, OPT_REPLICATION_MASTER)
 		res = True if int(value) else False
-		LOG.debug('is_replication_master: %s' % res)
+		LOG.debug('is_replication_main: %s' % res)
 		return res
 	
 	
@@ -264,18 +264,18 @@ class RedisAPI(object):
 
 
 	def get_primary_ip(self):
-		master_host = None
-		LOG.info("Requesting master server")
-		while not master_host:
+		main_host = None
+		LOG.info("Requesting main server")
+		while not main_host:
 			try:
-				master_host = list(host 
+				main_host = list(host 
 					for host in self._queryenv.list_roles(behaviour=BEHAVIOUR)[0].hosts 
-					if host.replication_master)[0]
+					if host.replication_main)[0]
 			except IndexError:
-				LOG.debug("QueryEnv respond with no %s master. " % BEHAVIOUR + 
+				LOG.debug("QueryEnv respond with no %s main. " % BEHAVIOUR + 
 						"Waiting %d seconds before the next attempt" % 5)
 				time.sleep(5)
-		host = master_host.internal_ip or master_host.external_ip
+		host = main_host.internal_ip or main_host.external_ip
 		LOG.debug('primary IP: %s' % host)
 		return host
 

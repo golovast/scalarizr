@@ -42,7 +42,7 @@ OPT_ROOT_PASSWORD 			= "root_password"
 OPT_ROOT_SSH_PUBLIC_KEY 	= "root_ssh_public_key"
 OPT_ROOT_SSH_PRIVATE_KEY	= "root_ssh_private_key"
 OPT_CURRENT_XLOG_LOCATION	= 'current_xlog_location'
-OPT_REPLICATION_MASTER 		= "replication_master"
+OPT_REPLICATION_MASTER 		= "replication_main"
 
 BACKUP_CHUNK_SIZE 		= 200*1024*1024
 
@@ -104,10 +104,10 @@ class PostgreSqlHander(ServiceCtlHandler):
 	def get_initialization_phases(self, hir_message):
 		if BEHAVIOUR in hir_message.body:
 			steps = [self._step_accept_scalr_conf, self._step_create_storage]
-			if hir_message.body[BEHAVIOUR]['replication_master'] == '1':
-				steps += [self._step_init_master, self._step_create_data_bundle]
+			if hir_message.body[BEHAVIOUR]['replication_main'] == '1':
+				steps += [self._step_init_main, self._step_create_data_bundle]
 			else:
-				steps += [self._step_init_slave]
+				steps += [self._step_init_subordinate]
 			steps += [self._step_collect_host_up_data]
 			
 			return {'before_host_up': [{
@@ -126,15 +126,15 @@ class PostgreSqlHander(ServiceCtlHandler):
 			
 			'postgresql_data_bundle',
 			
-			# @param host: New master hostname 
-			'before_postgresql_change_master',
+			# @param host: New main hostname 
+			'before_postgresql_change_main',
 			
-			# @param host: New master hostname 
-			'postgresql_change_master',
+			# @param host: New main hostname 
+			'postgresql_change_main',
 			
-			'before_slave_promote_to_master',
+			'before_subordinate_promote_to_main',
 			
-			'slave_promote_to_master'
+			'subordinate_promote_to_main'
 		)	
 		
 		self._phase_postgresql = 'Configure PostgreSQL'
@@ -144,10 +144,10 @@ class PostgreSqlHander(ServiceCtlHandler):
 		self._step_accept_scalr_conf = 'Accept Scalr configuration'
 		self._step_patch_conf = 'Patch configuration files'
 		self._step_create_storage = 'Create storage'
-		self._step_init_master = 'Initialize Master'
-		self._step_init_slave = 'Initialize Slave'
+		self._step_init_main = 'Initialize Main'
+		self._step_init_subordinate = 'Initialize Subordinate'
 		self._step_create_data_bundle = 'Create data bundle'
-		self._step_change_replication_master = 'Change replication Master'
+		self._step_change_replication_main = 'Change replication Main'
 		self._step_collect_host_up_data = 'Collect HostUp data'
 		
 		self.on_reload()		
@@ -215,7 +215,7 @@ class PostgreSqlHander(ServiceCtlHandler):
 					self._logger.warning("Scalr's root PgSQL user was changed. Recreating.")
 					self.postgresql.root_user.change_system_password(root_password)
 					
-			if self.is_replication_master:	
+			if self.is_replication_main:	
 				#ALTER ROLE cannot be executed in a read-only transaction
 				self._logger.debug("Checking password for pg_role scalr.")		
 				if not self.postgresql.root_user.check_role_password(root_password):
@@ -261,8 +261,8 @@ class PostgreSqlHander(ServiceCtlHandler):
 	
 	def on_HostInit(self, message):
 		if message.local_ip != self._platform.get_private_ip() and message.local_ip in self.pg_hosts:
-			self._logger.debug('Got new slave IP: %s. Registering in pg_hba.conf' % message.local_ip)
-			self.postgresql.register_slave(message.local_ip)
+			self._logger.debug('Got new subordinate IP: %s. Registering in pg_hba.conf' % message.local_ip)
+			self.postgresql.register_subordinate(message.local_ip)
 			
 
 	def on_HostUp(self, message):
@@ -276,8 +276,8 @@ class PostgreSqlHander(ServiceCtlHandler):
 	def on_HostDown(self, message):
 		if  message.local_ip != self._platform.get_private_ip():
 			self.postgresql.unregister_client(message.local_ip)
-			if self.is_replication_master and self.farmrole_id == message.farm_role_id:
-				self.postgresql.unregister_slave(message.local_ip)
+			if self.is_replication_main and self.farmrole_id == message.farm_role_id:
+				self.postgresql.unregister_subordinate(message.local_ip)
 	
 	@property			
 	def farm_hosts(self):
@@ -336,7 +336,7 @@ class PostgreSqlHander(ServiceCtlHandler):
 			
 			
 	@property
-	def is_replication_master(self):
+	def is_replication_main(self):
 		value = self._cnf.rawini.get(CNF_SECTION, OPT_REPLICATION_MASTER)
 		self._logger.debug('Got %s : %s' % (OPT_REPLICATION_MASTER, value))
 		return True if int(value) else False
@@ -344,7 +344,7 @@ class PostgreSqlHander(ServiceCtlHandler):
 				
 	@property
 	def postgres_tags(self):
-		return prepare_tags(BEHAVIOUR, db_replication_role=self.is_replication_master)
+		return prepare_tags(BEHAVIOUR, db_replication_role=self.is_replication_main)
 		
 				
 	def on_host_init_response(self, message):
@@ -365,7 +365,7 @@ class PostgreSqlHander(ServiceCtlHandler):
 					if message.postgresql[OPT_REPLICATION_MASTER] != '1'  and \
 							(not message.body.has_key(OPT_ROOT_SSH_PUBLIC_KEY) or not 
 							message.body.has_key(OPT_ROOT_SSH_PRIVATE_KEY)):
-						raise HandlerError("HostInitResponse message for PostgreSQL slave must contain both public and private ssh keys")
+						raise HandlerError("HostInitResponse message for PostgreSQL subordinate must contain both public and private ssh keys")
 					'''
 					
 					dir = os.path.dirname(self._volume_config_path)
@@ -404,13 +404,13 @@ class PostgreSqlHander(ServiceCtlHandler):
 		@param message: HostUp message
 		"""
 
-		repl = 'master' if self.is_replication_master else 'slave'
+		repl = 'main' if self.is_replication_main else 'subordinate'
 		#bus.fire('before_postgresql_configure', replication=repl)
 		
-		if self.is_replication_master:
-			self._init_master(message)									  
+		if self.is_replication_main:
+			self._init_main(message)									  
 		else:
-			self._init_slave(message)	
+			self._init_subordinate(message)	
 		bus.fire('service_configured', service_name=SERVICE_NAME, replication=repl)
 					
 				
@@ -430,7 +430,7 @@ class PostgreSqlHander(ServiceCtlHandler):
 		if message.local_ip == self._platform.get_private_ip():
 			self._logger.info('Stopping %s service' % BEHAVIOUR)
 			self.postgresql.service.stop('Server will be terminated')
-			if not self.is_replication_master:
+			if not self.is_replication_main:
 				self._logger.info('Destroying volume %s' % self.storage_vol.id)
 				self.storage_vol.destroy(remove_disks=True)
 				self._logger.info('Volume %s has been destroyed.' % self.storage_vol.id)
@@ -477,24 +477,24 @@ class PostgreSqlHander(ServiceCtlHandler):
 			))
 			
 
-	def on_DbMsr_PromoteToMaster(self, message):
+	def on_DbMsr_PromoteToMain(self, message):
 		"""
-		Promote slave to master
+		Promote subordinate to main
 		@type message: scalarizr.messaging.Message
-		@param message: postgresql_PromoteToMaster
+		@param message: postgresql_PromoteToMain
 		"""
 		
 		if message.db_type != BEHAVIOUR:
-			self._logger.error('Wrong db_type in DbMsr_PromoteToMaster message: %s' % message.db_type)
+			self._logger.error('Wrong db_type in DbMsr_PromoteToMain message: %s' % message.db_type)
 			return
 		
-		if self.is_replication_master:
-			self._logger.warning('Cannot promote to master. Already master')
+		if self.is_replication_main:
+			self._logger.warning('Cannot promote to main. Already main')
 			return
 		
-		bus.fire('before_slave_promote_to_master')
+		bus.fire('before_subordinate_promote_to_main')
 		
-		master_storage_conf = message.body.get('volume_config')
+		main_storage_conf = message.body.get('volume_config')
 		tx_complete = False	
 		old_conf 		= None
 		new_storage_vol	= None		
@@ -508,25 +508,25 @@ class PostgreSqlHander(ServiceCtlHandler):
 			
 			self.postgresql.stop_replication()
 			
-			if master_storage_conf and master_storage_conf['type'] != 'eph':
+			if main_storage_conf and main_storage_conf['type'] != 'eph':
 
-				self.postgresql.service.stop('Unplugging slave storage and then plugging master one')
+				self.postgresql.service.stop('Unplugging subordinate storage and then plugging main one')
 
 				old_conf = self.storage_vol.detach(force=True) # ??????
-				new_storage_vol = self._plug_storage(self._storage_path, master_storage_conf)	
+				new_storage_vol = self._plug_storage(self._storage_path, main_storage_conf)	
 							
-				# Continue if master storage is a valid postgresql storage 
+				# Continue if main storage is a valid postgresql storage 
 				if not self.postgresql.cluster_dir.is_initialized(self._storage_path):
 					raise HandlerError("%s is not a valid postgresql storage" % self._storage_path)
 				
 				Storage.backup_config(new_storage_vol.config(), self._volume_config_path) 
 				msg_data[BEHAVIOUR] = self._compat_storage_data(vol=new_storage_vol)
 				
-			slaves = [host.internal_ip for host in self._get_slave_hosts()]		
-			self.postgresql.init_master(self._storage_path, self.root_password, slaves)
+			subordinates = [host.internal_ip for host in self._get_subordinate_hosts()]		
+			self.postgresql.init_main(self._storage_path, self.root_password, subordinates)
 			self._update_config({OPT_REPLICATION_MASTER : "1"})	
 				
-			if not master_storage_conf or master_storage_conf['type'] == 'eph':									
+			if not main_storage_conf or main_storage_conf['type'] == 'eph':									
 				snap = self._create_snapshot()
 				Storage.backup_config(snap.config(), self._snapshot_config_path)
 				msg_data[BEHAVIOUR] = self._compat_storage_data(self.storage_vol, snap)
@@ -535,13 +535,13 @@ class PostgreSqlHander(ServiceCtlHandler):
 			self.send_message(DbMsrMessages.DBMSR_PROMOTE_TO_MASTER_RESULT, msg_data)	
 								
 			tx_complete = True
-			bus.fire('slave_promote_to_master')
+			bus.fire('subordinate_promote_to_main')
 			
 		except (Exception, BaseException), e:
 			self._logger.exception(e)
 			if new_storage_vol:
 				new_storage_vol.detach()
-			# Get back slave storage
+			# Get back subordinate storage
 			if old_conf:
 				self._plug_storage(self._storage_path, old_conf)
 			
@@ -554,35 +554,35 @@ class PostgreSqlHander(ServiceCtlHandler):
 			# Start postgresql
 			self.postgresql.service.start()
 		
-		if tx_complete and master_storage_conf and master_storage_conf['type'] != 'eph':
-			# Delete slave EBS
+		if tx_complete and main_storage_conf and main_storage_conf['type'] != 'eph':
+			# Delete subordinate EBS
 			self.storage_vol.destroy(remove_disks=True)
 			self.storage_vol = new_storage_vol
 			Storage.backup_config(self.storage_vol.config(), self._volume_config_path)
 
 	
-	def on_DbMsr_NewMasterUp(self, message):
+	def on_DbMsr_NewMainUp(self, message):
 		"""
-		Switch replication to a new master server
+		Switch replication to a new main server
 		@type message: scalarizr.messaging.Message
-		@param message:  DbMsr_NewMasterUp
+		@param message:  DbMsr_NewMainUp
 		"""
 		if not message.body.has_key(BEHAVIOUR) or message.db_type != BEHAVIOUR:
-			raise HandlerError("DbMsr_NewMasterUp message for PostgreSQL behaviour must have 'postgresql' property and db_type 'postgresql'")
+			raise HandlerError("DbMsr_NewMainUp message for PostgreSQL behaviour must have 'postgresql' property and db_type 'postgresql'")
 		
 		postgresql_data = message.postgresql.copy()
 		
-		if self.is_replication_master:
-			self._logger.debug('Skipping NewMasterUp. My replication role is master')	
+		if self.is_replication_main:
+			self._logger.debug('Skipping NewMainUp. My replication role is main')	
 			return 
 		
 		host = message.local_ip or message.remote_ip
-		self._logger.info("Switching replication to a new postgresql master %s", host)
-		bus.fire('before_postgresql_change_master', host=host)			
+		self._logger.info("Switching replication to a new postgresql main %s", host)
+		bus.fire('before_postgresql_change_main', host=host)			
 		
 		if OPT_SNAPSHOT_CNF in postgresql_data and postgresql_data[OPT_SNAPSHOT_CNF]['type'] != 'eph':
 			snap_data = postgresql_data[OPT_SNAPSHOT_CNF]
-			self._logger.info('Reinitializing Slave from the new snapshot %s', 
+			self._logger.info('Reinitializing Subordinate from the new snapshot %s', 
 					snap_data['id'])
 			self.postgresql.service.stop()
 			
@@ -599,10 +599,10 @@ class PostgreSqlHander(ServiceCtlHandler):
 			Storage.backup_config(snap_data, self._snapshot_config_path)
 			self.storage_vol = vol
 		
-		self.postgresql.init_slave(self._storage_path, host, POSTGRESQL_DEFAULT_PORT, self.root_password)
+		self.postgresql.init_subordinate(self._storage_path, host, POSTGRESQL_DEFAULT_PORT, self.root_password)
 			
 		self._logger.debug("Replication switched")
-		bus.fire('postgresql_change_master', host=host)
+		bus.fire('postgresql_change_main', host=host)
 
 	def on_DbMsr_CreateBackup(self, message):
 		#TODO: Think how to move the most part of it into Postgresql class 
@@ -693,14 +693,14 @@ class PostgreSqlHander(ServiceCtlHandler):
 				os.remove(backup_path)				
 		
 								
-	def _init_master(self, message):
+	def _init_main(self, message):
 		"""
-		Initialize postgresql master
+		Initialize postgresql main
 		@type message: scalarizr.messaging.Message 
 		@param message: HostUp message
 		"""
 		
-		self._logger.info("Initializing PostgreSQL master")
+		self._logger.info("Initializing PostgreSQL main")
 		
 		with bus.initialization_op as op:
 			with op.step(self._step_create_storage):		
@@ -715,11 +715,11 @@ class PostgreSqlHander(ServiceCtlHandler):
 				self.storage_vol = self._plug_storage(mpoint=self._storage_path, vol=volume_cnf)
 				Storage.backup_config(self.storage_vol.config(), self._volume_config_path)		
 				
-			with op.step(self._step_init_master):
-				self.postgresql.init_master(mpoint=self._storage_path, password=self.root_password)
+			with op.step(self._step_init_main):
+				self.postgresql.init_main(mpoint=self._storage_path, password=self.root_password)
 				
 				msg_data = dict()
-				msg_data.update({OPT_REPLICATION_MASTER 		: 	str(int(self.is_replication_master)),
+				msg_data.update({OPT_REPLICATION_MASTER 		: 	str(int(self.is_replication_main)),
 									OPT_ROOT_USER				:	self.postgresql.root_user.name,
 									OPT_ROOT_PASSWORD			:	self.root_password,
 									OPT_CURRENT_XLOG_LOCATION	: 	None})	
@@ -746,49 +746,49 @@ class PostgreSqlHander(ServiceCtlHandler):
 						pass 
 					self._update_config(msg_data)
 	
-	def _get_master_host(self):
-		master_host = None
-		self._logger.info("Requesting master server")
-		while not master_host:
+	def _get_main_host(self):
+		main_host = None
+		self._logger.info("Requesting main server")
+		while not main_host:
 			try:
-				master_host = list(host 
+				main_host = list(host 
 					for host in self._queryenv.list_roles(behaviour=BEHAVIOUR)[0].hosts 
-					if host.replication_master)[0]
+					if host.replication_main)[0]
 			except IndexError:
-				self._logger.debug("QueryEnv respond with no postgresql master. " + 
+				self._logger.debug("QueryEnv respond with no postgresql main. " + 
 						"Waiting %d seconds before the next attempt", 5)
 				time.sleep(5)
-		return master_host
+		return main_host
 	
-	def _get_slave_hosts(self):
+	def _get_subordinate_hosts(self):
 		self._logger.info("Requesting standby servers")
 		return list(host for host in self._queryenv.list_roles(behaviour=BEHAVIOUR)[0].hosts 
-				if not host.replication_master)
+				if not host.replication_main)
 				
-	def _init_slave(self, message):
+	def _init_subordinate(self, message):
 		"""
-		Initialize postgresql slave
+		Initialize postgresql subordinate
 		@type message: scalarizr.messaging.Message 
 		@param message: HostUp message
 		"""
-		self._logger.info("Initializing postgresql slave")
+		self._logger.info("Initializing postgresql subordinate")
 		
 		with bus.initialization_op as op:
 			with op.step(self._step_create_storage):
-				self._logger.debug("Initialize slave storage")
+				self._logger.debug("Initialize subordinate storage")
 				self.storage_vol = self._plug_storage(self._storage_path, 
 						dict(snapshot=Storage.restore_config(self._snapshot_config_path)))			
 				Storage.backup_config(self.storage_vol.config(), self._volume_config_path)
 			
-			with op.step(self._step_init_slave):
-				# Change replication master 
-				master_host = self._get_master_host()
+			with op.step(self._step_init_subordinate):
+				# Change replication main 
+				main_host = self._get_main_host()
 						
-				self._logger.debug("Master server obtained (local_ip: %s, public_ip: %s)",
-						master_host.internal_ip, master_host.external_ip)
+				self._logger.debug("Main server obtained (local_ip: %s, public_ip: %s)",
+						main_host.internal_ip, main_host.external_ip)
 				
-				host = master_host.internal_ip or master_host.external_ip
-				self.postgresql.init_slave(self._storage_path, host, POSTGRESQL_DEFAULT_PORT, self.root_password)
+				host = main_host.internal_ip or main_host.external_ip
+				self.postgresql.init_subordinate(self._storage_path, host, POSTGRESQL_DEFAULT_PORT, self.root_password)
 			
 			with op.step(self._step_collect_host_up_data):
 				# Update HostUp message

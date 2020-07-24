@@ -48,7 +48,7 @@ __mysql__ = mysql2_svc.__mysql__
 OPT_ROOT_PASSWORD 		= "root_password"
 OPT_REPL_PASSWORD 		= "repl_password"
 OPT_STAT_PASSWORD   	= "stat_password"
-OPT_REPLICATION_MASTER  = "replication_master"
+OPT_REPLICATION_MASTER  = "replication_main"
 
 OPT_LOG_FILE 			= "log_file"
 OPT_LOG_POS				= "log_pos"
@@ -80,7 +80,7 @@ DATA_DIR = os.path.join(STORAGE_PATH, mysql_svc.STORAGE_DATA_DIR)
 '''
 
 PRIVILEGES = {
-	__mysql__['repl_user']: ('Repl_slave_priv', ), 
+	__mysql__['repl_user']: ('Repl_subordinate_priv', ), 
 	__mysql__['stat_user']: ('Repl_client_priv', )
 }
 	
@@ -283,14 +283,14 @@ class MysqlHandler(DBMSRHandler):
 		bus.define_events(
 			'before_mysql_data_bundle',
 			'mysql_data_bundle',
-			# @param host: New master hostname 
-			'before_mysql_change_master',
-			# @param host: New master hostname 
+			# @param host: New main hostname 
+			'before_mysql_change_main',
+			# @param host: New main hostname 
 			# @param log_file: log file to start from 
 			# @param log_pos: log pos to start from 
-			'mysql_change_master'
-			'before_slave_promote_to_master',
-			'slave_promote_to_master'
+			'mysql_change_main'
+			'before_subordinate_promote_to_main',
+			'subordinate_promote_to_main'
 		)
 		
 		self._phase_mysql = 'Configure MySQL'
@@ -304,7 +304,7 @@ class MysqlHandler(DBMSRHandler):
 		self._step_create_users = 'Create Scalr users'
 		self._step_restore_users = 'Restore Scalr users'
 		self._step_create_data_bundle = 'Create data bundle'
-		self._step_change_replication_master = 'Change replication Master'
+		self._step_change_replication_main = 'Change replication Main'
 		self._step_innodb_recovery = 'InnoDB recovery'
 		self._step_collect_hostup_data = 'Collect HostUp data'
 		
@@ -328,10 +328,10 @@ class MysqlHandler(DBMSRHandler):
 		if __mysql__['behavior'] in hir_message.body:
 			steps = [self._step_accept_scalr_conf, 
 					self._step_create_storage]
-			if hir_message.body[__mysql__['behavior']]['replication_master'] == '1':
+			if hir_message.body[__mysql__['behavior']]['replication_main'] == '1':
 				steps.append(self._step_create_data_bundle)
 			else:
-				steps.append(self._step_change_replication_master)
+				steps.append(self._step_change_replication_main)
 			steps.append(self._step_collect_hostup_data)
 		
 			
@@ -368,7 +368,7 @@ class MysqlHandler(DBMSRHandler):
 				vol.tags = self.resource_tags()
 			vol.ensure(mount=True)
 			__mysql__['volume'] = vol
-			if int(__mysql__['replication_master']):
+			if int(__mysql__['replication_main']):
 				LOG.debug("Checking Scalr's %s system users presence", 
 						__mysql__['behavior'])
 				creds = self.get_user_creds()
@@ -382,7 +382,7 @@ class MysqlHandler(DBMSRHandler):
 			if not self.storage_vol.mounted():
 				self.storage_vol.mount()
 			
-			if self.is_replication_master:
+			if self.is_replication_main:
 				LOG.debug("Checking Scalr's %s system users presence." % __mysql__['behavior'])
 				creds = self.get_user_creds()
 				self.create_users(**creds)
@@ -422,9 +422,9 @@ class MysqlHandler(DBMSRHandler):
 					else:
 						# Compatibility transformation
 						# - volume_config -> volume
-						# - master n'th start, type=ebs - del snapshot_config
+						# - main n'th start, type=ebs - del snapshot_config
 						# - snapshot_config + log_file + log_pos -> restore
-						# - create backup on master 1'st start
+						# - create backup on main 1'st start
 						md['compat_prior_backup_restore'] = True
 						if md.get('volume_config'):
 							md['volume'] = storage2.volume(
@@ -444,7 +444,7 @@ class MysqlHandler(DBMSRHandler):
 									volume=md['volume'],
 									log_file=md.pop('log_file'),
 									log_pos=md.pop('log_pos'))
-						elif int(md['replication_master']) and \
+						elif int(md['replication_main']) and \
 									not md['volume'].device:
 							md['backup'] = backup.backup(
 									type='snap_mysql',
@@ -473,12 +473,12 @@ class MysqlHandler(DBMSRHandler):
 		
 		self.generate_datadir()
 		self.mysql.service.stop('Configuring MySQL')
-		repl = 'master' if int(__mysql__['replication_master']) else 'slave'
+		repl = 'main' if int(__mysql__['replication_main']) else 'subordinate'
 		bus.fire('before_mysql_configure', replication=repl)
-		if repl == 'master':
-			self._init_master(message)	
+		if repl == 'main':
+			self._init_main(message)	
 		else:
-			self._init_slave(message)
+			self._init_subordinate(message)
 		# Force to resave volume settings
 		__mysql__['volume'] = storage2.volume(__mysql__['volume'])
 		bus.fire('service_configured', service_name=__mysql__['behavior'], replication=repl)
@@ -493,7 +493,7 @@ class MysqlHandler(DBMSRHandler):
 			LOG.info('Detaching MySQL storage')
 			vol = storage2.volume(__mysql__['volume'])
 			vol.detach()
-			if not int(__mysql__['replication_master']):
+			if not int(__mysql__['replication_main']):
 				LOG.info('Destroying volume %s', vol.id)
 				vol.destroy(remove_disks=True)
 				LOG.info('Volume %s has been destroyed.' % vol.id)	
@@ -505,10 +505,10 @@ class MysqlHandler(DBMSRHandler):
 		assert message.farm_role_id
 		
 		try:
-			# Operation allowed only on Master server
-			if not int(__mysql__['replication_master']):
-				msg = 'Cannot add pma user on slave. ' \
-						'It should be a Master server'
+			# Operation allowed only on Main server
+			if not int(__mysql__['replication_main']):
+				msg = 'Cannot add pma user on subordinate. ' \
+						'It should be a Main server'
 				raise HandlerError(msg)
 			
 			pma_server_ip = message.pma_server_ip
@@ -736,11 +736,11 @@ class MysqlHandler(DBMSRHandler):
 			))
 	
 	
-	def on_DbMsr_PromoteToMaster(self, message):
+	def on_DbMsr_PromoteToMain(self, message):
 		"""
-		Promote slave to master
+		Promote subordinate to main
 		"""
-		LOG.debug("on_DbMsr_PromoteToMaster")
+		LOG.debug("on_DbMsr_PromoteToMain")
 		#assert message.body['volume_config']
 		#assert message.mysql2
 		mysql2 = message.body[__mysql__['behavior']]
@@ -749,12 +749,12 @@ class MysqlHandler(DBMSRHandler):
 		#assert mysql2['stat_password']
 
 		
-		if int(__mysql__['replication_master']):
-			LOG.warning('Cannot promote to master. Already master')
+		if int(__mysql__['replication_main']):
+			LOG.warning('Cannot promote to main. Already main')
 			return
-		LOG.info('Starting Slave -> Master promotion')
+		LOG.info('Starting Subordinate -> Main promotion')
 			
-		bus.fire('before_slave_promote_to_master')
+		bus.fire('before_subordinate_promote_to_main')
 
 		__mysql__['compat_prior_backup_restore'] = mysql2.get('volume_config') or mysql2.get('snapshot_config')
 		new_vol	= None
@@ -764,30 +764,30 @@ class MysqlHandler(DBMSRHandler):
 		try:
 			if new_vol and new_vol.type not in ('eph', 'lvm'):
 				if self.mysql.service.running:
-					self.root_client.stop_slave()
+					self.root_client.stop_subordinate()
 
-					self.mysql.service.stop('Swapping storages to promote slave to master')
+					self.mysql.service.stop('Swapping storages to promote subordinate to main')
 				
-				# Unplug slave storage and plug master one
+				# Unplug subordinate storage and plug main one
 				#old_conf = self.storage_vol.detach(force=True) # ??????
 				old_vol = storage2.volume(__mysql__['volume'])				
 				try:
 					old_vol.umount()
-					#master_vol = self._take_master_volume(master_vol_id)
+					#main_vol = self._take_main_volume(main_vol_id)
 					new_vol.mpoint = __mysql__['storage_dir']				
 					new_vol.ensure(mount=True)				
-					#new_storage_vol = self._plug_storage(STORAGE_PATH, master_storage_conf)				
-					# Continue if master storage is a valid MySQL storage 
+					#new_storage_vol = self._plug_storage(STORAGE_PATH, main_storage_conf)				
+					# Continue if main storage is a valid MySQL storage 
 					if self._storage_valid():
 						# Patch configuration files 
 						self.mysql.move_mysqldir_to(__mysql__['storage_dir'])
-						self.mysql._init_replication(master=True)
+						self.mysql._init_replication(main=True)
 						# Set read_only option
 						self.mysql.my_cnf.read_only = False
 						self.mysql.service.start()
 						# Update __mysql__['behavior'] configuration
 						__mysql__.update({
-							'replication_master': 1,
+							'replication_main': 1,
 							'root_password': mysql2['root_password'],
 							'repl_password': mysql2['repl_password'],
 							'stat_password': mysql2['stat_password'],
@@ -841,12 +841,12 @@ class MysqlHandler(DBMSRHandler):
 				self.mysql.my_cnf.read_only = False
 				self.mysql.service.start()
 
-				self.root_client.stop_slave()
-				self.root_client.reset_master()
+				self.root_client.stop_subordinate()
+				self.root_client.reset_main()
 				self.mysql.flush_logs(__mysql__['data_dir'])
 				
 				__mysql__.update({
-					'replication_master': 1,
+					'replication_main': 1,
 					'root_password': mysql2['root_password'],
 					'repl_password': mysql2['repl_password'],
 					'stat_password': mysql2['stat_password'],
@@ -894,7 +894,7 @@ class MysqlHandler(DBMSRHandler):
 				self.send_message(DbMsrMessages.DBMSR_PROMOTE_TO_MASTER_RESULT, msg_data)
 				LOG.info('Promotion completed')							
 				
-			bus.fire('slave_promote_to_master')
+			bus.fire('subordinate_promote_to_main')
 			
 		except (Exception, BaseException), e:
 			LOG.exception(e)
@@ -914,7 +914,7 @@ class MysqlHandler(DBMSRHandler):
 		
 
 		
-	def on_DbMsr_NewMasterUp(self, message):
+	def on_DbMsr_NewMainUp(self, message):
 
 		assert message.body.has_key("db_type")
 		assert message.body.has_key("local_ip")
@@ -923,13 +923,13 @@ class MysqlHandler(DBMSRHandler):
 	
 		mysql2 = message.body[__mysql__['behavior']]
 		
-		if int(__mysql__['replication_master']):
-			LOG.debug('Skip NewMasterUp. My replication role is master')
+		if int(__mysql__['replication_main']):
+			LOG.debug('Skip NewMainUp. My replication role is main')
 			return
 		
 		host = message.local_ip or message.remote_ip
-		LOG.info("Switching replication to a new MySQL master %s", host)
-		bus.fire('before_mysql_change_master', host=host)			
+		LOG.info("Switching replication to a new MySQL main %s", host)
+		bus.fire('before_mysql_change_main', host=host)			
 
 		LOG.debug("__mysql__['volume']: %s", __mysql__['volume'])
 		
@@ -946,12 +946,12 @@ class MysqlHandler(DBMSRHandler):
 							snapshot=mysql2['snapshot_config'])
 			# XXX: ugly
 			if __mysql__['volume'].type == 'eph':
-				self.mysql.service.stop('Swapping storages to reinitialize slave')
+				self.mysql.service.stop('Swapping storages to reinitialize subordinate')
 				'''
-				LOG.info('Reinitializing Slave from the new snapshot %s (log_file: %s log_pos: %s)', 
+				LOG.info('Reinitializing Subordinate from the new snapshot %s (log_file: %s log_pos: %s)', 
 						restore.snapshot['id'], restore.log_file, restore.log_pos)
 				new_vol = restore.run()
-				self.mysql.service.stop('Swapping storages to reinitialize slave')
+				self.mysql.service.stop('Swapping storages to reinitialize subordinate')
 			
 				LOG.debug('Destroing old storage')
 				vol = storage.volume(**__mysql__['volume'])
@@ -976,18 +976,18 @@ class MysqlHandler(DBMSRHandler):
 			
 			self.mysql.service.start()
 		else:
-			LOG.debug("Stopping slave i/o thread")
-			self.root_client.stop_slave_io_thread()
-			LOG.debug("Slave i/o thread stopped")
+			LOG.debug("Stopping subordinate i/o thread")
+			self.root_client.stop_subordinate_io_thread()
+			LOG.debug("Subordinate i/o thread stopped")
 			
 			LOG.debug("Retrieving current log_file and log_pos")
-			status = self.root_client.slave_status()
-			log_file = status['Master_Log_File']
-			log_pos = status['Read_Master_Log_Pos']
+			status = self.root_client.subordinate_status()
+			log_file = status['Main_Log_File']
+			log_pos = status['Read_Main_Log_Pos']
 			LOG.debug("Retrieved log_file=%s, log_pos=%s", log_file, log_pos)
 
 
-		self._change_master(
+		self._change_main(
 			host=host, 
 			user=__mysql__['repl_user'], 
 			password=mysql2['repl_password'],
@@ -996,7 +996,7 @@ class MysqlHandler(DBMSRHandler):
 		)
 			
 		LOG.debug("Replication switched")
-		bus.fire('mysql_change_master', host=host, log_file=log_file, log_pos=log_pos)
+		bus.fire('mysql_change_main', host=host, log_file=log_file, log_pos=log_pos)
 
 
 	def on_ConvertVolume(self, message):
@@ -1056,13 +1056,13 @@ class MysqlHandler(DBMSRHandler):
 					os.path.dirname(__mysql__['storage_dir'])), raise_exc=False)
 	
 		
-	def _init_master(self, message):
+	def _init_main(self, message):
 		"""
-		Initialize MySQL master
+		Initialize MySQL main
 		@type message: scalarizr.messaging.Message 
 		@param message: HostUp message
 		"""
-		LOG.info("Initializing MySQL master")
+		LOG.info("Initializing MySQL main")
 		
 		with bus.initialization_op as op:
 			with op.step(self._step_create_storage):
@@ -1097,12 +1097,12 @@ class MysqlHandler(DBMSRHandler):
 		
 			with op.step(self._step_patch_conf):
 				# Init replication
-				self.mysql._init_replication(master=True)
+				self.mysql._init_replication(main=True)
 				
 			if 'restore' in __mysql__ and \
 					__mysql__['restore'].type == 'xtrabackup':
 				__mysql__['restore'].run()
-				if __mysql__['restore'].features['master_binlog_reset']:
+				if __mysql__['restore'].features['main_binlog_reset']:
 					self.mysql.service.start()
 					self.mysql.service.stop()
 					log_file, log_pos = mysql2_svc.mysqlbinlog_head()
@@ -1110,7 +1110,7 @@ class MysqlHandler(DBMSRHandler):
 					__mysql__['restore'].log_pos = log_pos
 			
 		
-		# If It's 1st init of mysql master storage
+		# If It's 1st init of mysql main storage
 		if not storage_valid:
 			with op.step(self._step_create_users):			
 				if os.path.exists(__mysql__['debian.cnf']):
@@ -1136,7 +1136,7 @@ class MysqlHandler(DBMSRHandler):
 		with op.step(self._step_collect_hostup_data):
 			# Update HostUp message
 			md = dict(
-				replication_master=__mysql__['replication_master'],
+				replication_main=__mysql__['replication_main'],
 				root_password=__mysql__['root_password'],
 				repl_password=__mysql__['repl_password'],
 				stat_password=__mysql__['stat_password'],
@@ -1168,13 +1168,13 @@ class MysqlHandler(DBMSRHandler):
 			
 			
 
-	def _init_slave(self, message):
+	def _init_subordinate(self, message):
 		"""
-		Initialize MySQL slave
+		Initialize MySQL subordinate
 		@type message: scalarizr.messaging.Message 
 		@param message: HostUp message
 		"""
-		LOG.info("Initializing MySQL slave")
+		LOG.info("Initializing MySQL subordinate")
 		
 		with bus.initialization_op as op:
 			with op.step(self._step_create_storage):
@@ -1185,14 +1185,14 @@ class MysqlHandler(DBMSRHandler):
 					__mysql__['volume'].ensure(mount=True, mkfs=True)
 				'''
 				if not self._storage_valid():
-					LOG.debug("Initialize slave storage")
+					LOG.debug("Initialize subordinate storage")
 					__mysql__['restore'].run()
 				else:
 					__mysql__['volume'].ensure(mount=True, mkfs=True)
 				'''
 		
 			with op.step(self._step_patch_conf):		
-				self.mysql.service.stop('Required by Slave initialization process')			
+				self.mysql.service.stop('Required by Subordinate initialization process')			
 				self.mysql.flush_logs(__mysql__['data_dir'])
 				
 				# Change configuration files
@@ -1205,7 +1205,7 @@ class MysqlHandler(DBMSRHandler):
 			with op.step(self._step_move_datadir):
 				self.mysql.move_mysqldir_to(__mysql__['storage_dir'])
 				self._change_selinux_ctx()
-				self.mysql._init_replication(master=False)
+				self.mysql._init_replication(main=False)
 				self._copy_debian_cnf_back()
 				
 			if 'restore' in __mysql__ and \
@@ -1218,13 +1218,13 @@ class MysqlHandler(DBMSRHandler):
 					self._innodb_recovery()
 					self.mysql.service.start()
 			
-			with op.step(self._step_change_replication_master):
-				# Change replication master 
-				LOG.info("Requesting master server")
-				master_host = self.get_master_host()
+			with op.step(self._step_change_replication_main):
+				# Change replication main 
+				LOG.info("Requesting main server")
+				main_host = self.get_main_host()
 	
-				self._change_master( 
-						host=master_host, 
+				self._change_main( 
+						host=main_host, 
 						user=__mysql__['repl_user'], 
 						password=__mysql__['repl_password'],
 						log_file=__mysql__['restore'].log_file, 
@@ -1236,20 +1236,20 @@ class MysqlHandler(DBMSRHandler):
 				message.db_type = __mysql__['behavior']
 
 		
-	def get_master_host(self):
-		master_host = None
-		while not master_host:
+	def get_main_host(self):
+		main_host = None
+		while not main_host:
 			try:
-				master_host = list(host 
+				main_host = list(host 
 					for host in self._queryenv.list_roles(behaviour=__mysql__['behavior'])[0].hosts 
-					if host.replication_master)[0]
+					if host.replication_main)[0]
 			except IndexError:
-				LOG.debug("QueryEnv respond with no mysql master. " + 
+				LOG.debug("QueryEnv respond with no mysql main. " + 
 						"Waiting %d seconds before the next attempt", 5)
 			time.sleep(5)
-		LOG.debug("Master server obtained (local_ip: %s, public_ip: %s)",
-				master_host.internal_ip, master_host.external_ip)
-		return master_host.internal_ip or master_host.external_ip
+		LOG.debug("Main server obtained (local_ip: %s, public_ip: %s)",
+				main_host.internal_ip, main_host.external_ip)
+		return main_host.internal_ip or main_host.external_ip
 
 			
 	def _copy_debian_cnf_back(self):
@@ -1298,7 +1298,7 @@ class MysqlHandler(DBMSRHandler):
 			'--skip-networking', 
 			'--skip-grant', 
 			'--bootstrap', 
-			'--skip-slave-start')
+			'--skip-subordinate-start')
 		system2(mysqld_safe_cmd, stdin="select 1;")	
 
 		
@@ -1421,28 +1421,28 @@ class MysqlHandler(DBMSRHandler):
 		return stat.f_bsize * stat.f_blocks / 1024 / 1024 / 1024 + 1
 		
 
-	def _change_master(self, host, user, password, log_file, log_pos, timeout=None):
+	def _change_main(self, host, user, password, log_file, log_pos, timeout=None):
 		
-		LOG.info("Changing replication Master to server %s (log_file: %s, log_pos: %s)", host, log_file, log_pos)
+		LOG.info("Changing replication Main to server %s (log_file: %s, log_pos: %s)", host, log_file, log_pos)
 		
-		timeout = timeout or int(__mysql__['change_master_timeout'])
+		timeout = timeout or int(__mysql__['change_main_timeout'])
 		
-		# Changing replication master
-		self.root_client.stop_slave()
-		self.root_client.change_master_to(host, user, password, log_file, log_pos)
+		# Changing replication main
+		self.root_client.stop_subordinate()
+		self.root_client.change_main_to(host, user, password, log_file, log_pos)
 		
-		# Starting slave
-		result = self.root_client.start_slave()
-		LOG.debug('Start slave returned: %s' % result)
+		# Starting subordinate
+		result = self.root_client.start_subordinate()
+		LOG.debug('Start subordinate returned: %s' % result)
 		if result and 'ERROR' in result:
-			raise HandlerError('Cannot start mysql slave: %s' % result)
+			raise HandlerError('Cannot start mysql subordinate: %s' % result)
 
 		time_until = time.time() + timeout
 		status = None
 		while time.time() <= time_until:
-			status = self.root_client.slave_status()
-			if status['Slave_IO_Running'] == 'Yes' and \
-				status['Slave_SQL_Running'] == 'Yes':
+			status = self.root_client.subordinate_status()
+			if status['Subordinate_IO_Running'] == 'Yes' and \
+				status['Subordinate_SQL_Running'] == 'Yes':
 				break
 			time.sleep(5)
 		else:
@@ -1451,7 +1451,7 @@ class MysqlHandler(DBMSRHandler):
 					logfile = firstmatched(lambda p: os.path.exists(p), 
 										('/var/log/mysqld.log', '/var/log/mysql.log'))
 					if logfile:
-						gotcha = '[ERROR] Slave I/O thread: '
+						gotcha = '[ERROR] Subordinate I/O thread: '
 						size = os.path.getsize(logfile)
 						fp = open(logfile, 'r')
 						try:
@@ -1463,19 +1463,19 @@ class MysqlHandler(DBMSRHandler):
 						finally:
 							fp.close()
 				
-				msg = "Cannot change replication Master server to '%s'. "  \
-						"Slave_IO_Running: %s, Slave_SQL_Running: %s, " \
+				msg = "Cannot change replication Main server to '%s'. "  \
+						"Subordinate_IO_Running: %s, Subordinate_SQL_Running: %s, " \
 						"Last_Errno: %s, Last_Error: '%s'" % (
-						host, status['Slave_IO_Running'], status['Slave_SQL_Running'],
+						host, status['Subordinate_IO_Running'], status['Subordinate_SQL_Running'],
 						status['Last_Errno'], status['Last_Error'])
 				raise HandlerError(msg)
 			else:
-				raise HandlerError('Cannot change replication master to %s' % (host))
+				raise HandlerError('Cannot change replication main to %s' % (host))
 
 				
-		LOG.debug('Replication master is changed to host %s', host)		
+		LOG.debug('Replication main is changed to host %s', host)		
 
 
 	def resource_tags(self):
 		return prepare_tags(__mysql__['behavior'], 
-				db_replication_role=__mysql__['replication_master'])
+				db_replication_role=__mysql__['replication_main'])
