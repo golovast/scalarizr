@@ -49,8 +49,8 @@ __mysql__.update({
 	'my.cnf': '/etc/my.cnf' if linux.os['family'] in ('RedHat', 'Oracle') else '/etc/mysql/my.cnf',
 	#'mysqld_exec': util.try_exec('/usr/sbin/mysqld', '/usr/libexec/mysqld')
 	'mysqldump_chunk_size': 200 * 1024 * 1024,
-	'stop_slave_timeout': 180,
-	'change_master_timeout': 60,
+	'stop_subordinate_timeout': 180,
+	'change_main_timeout': 60,
 	'defaults': {
 		'datadir': '/var/lib/mysql',
 		'log_bin': 'mysql_bin'
@@ -77,7 +77,7 @@ class MySQLSnapBackup(backup.SnapBackup):
 		self._mysql_init.start()
 		client = self._client()
 		client.lock_tables()
-		(log_file, log_pos) = client.master_status()
+		(log_file, log_pos) = client.main_status()
 
 		upd = {'log_file': log_file, 'log_pos': log_pos}
 		state.update(upd)
@@ -290,7 +290,7 @@ class XtrabackupRestore(XtrabackupMixin, backup.Restore):
 				to_lsn=to_lsn, backup_type=backup_type, backup_dir=backup_dir,
 				volume=volume, snapshot=snapshot, **kwds)
 		XtrabackupMixin.__init__(self)
-		self.features['master_binlog_reset'] = True
+		self.features['main_binlog_reset'] = True
 		self._mysql_init = mysql_svc.MysqlInitScript()
 		self._data_dir = None
 		self._binlog_dir = None
@@ -451,7 +451,7 @@ class MySQLDumpBackup(backup.Backup):
 				chunk_size=chunk_size or __mysql__['mysqldump_chunk_size'],
 				**kwds)
 		self.features.update({
-			'start_slave': False
+			'start_subordinate': False
 		})
 
 

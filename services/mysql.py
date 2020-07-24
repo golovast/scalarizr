@@ -80,30 +80,30 @@ class MySQL(BaseService):
 				fp.close()
 
 	
-	def _init_replication(self, master=True):
+	def _init_replication(self, main=True):
 		LOG.info('Initializing replication')
-		server_id = 1 if master else int(random.random() * 100000)+1
+		server_id = 1 if main else int(random.random() * 100000)+1
 		self.my_cnf.server_id = server_id
 		self.my_cnf.bind_address = None
 		self.my_cnf.skip_networking = None
 
 	
-	def init_master(self):
+	def init_main(self):
 		pass
 	
-	def init_slave(self):
+	def init_subordinate(self):
 		pass
 	
 	def _init_service(self):
 		pass
 	
-	def change_master_to(self):
-		# client.change_master_to
+	def change_main_to(self):
+		# client.change_main_to
 		# check_replication_health and wait 
 		pass
 
 	def check_replication_health(self):
-		# set slave status
+		# set subordinate status
 		# on fail get status from error.log
 		pass
 			
@@ -158,7 +158,7 @@ class MySQL(BaseService):
 		if not os.path.exists(data_dir):
 			return
 		
-		info_files = ['relay-log.info', 'master.info']
+		info_files = ['relay-log.info', 'main.info']
 		files = os.listdir(data_dir)
 		
 		for file in files:
@@ -212,19 +212,19 @@ class MySQLClient(object):
 		return databases
 		
 	
-	def start_slave(self):
+	def start_subordinate(self):
 		return self.fetchone('START SLAVE')
 	
 			
-	def stop_slave(self):
+	def stop_subordinate(self):
 		return self.fetchone("STOP SLAVE")
 			
 			
-	def reset_slave(self):
+	def reset_subordinate(self):
 		return self.fetchone("RESET SLAVE")
 
 
-	def stop_slave_io_thread(self):
+	def stop_subordinate_io_thread(self):
 		return self.fetchone("STOP SLAVE IO_THREAD")
 	
 	
@@ -271,7 +271,7 @@ class MySQLClient(object):
 		return self.fetchone("FLUSH PRIVILEGES")
 	
 			
-	def change_master_to(self, host, user, password, log_file, log_pos):
+	def change_main_to(self, host, user, password, log_file, log_pos):
 		return self.fetchone('CHANGE MASTER TO MASTER_HOST="%(host)s", \
 						MASTER_USER="%(user)s", \
 						MASTER_PASSWORD="%(password)s", \
@@ -280,30 +280,30 @@ class MySQLClient(object):
 						MASTER_CONNECT_RETRY=15;' % vars())
 	
 	
-	def slave_status(self):
+	def subordinate_status(self):
 		variables = dict(
-				Slave_IO_Running=None, 
-				Slave_SQL_Running=None,
+				Subordinate_IO_Running=None, 
+				Subordinate_SQL_Running=None,
 				Last_Error = None,
 				Last_Errno = None,
-				Exec_Master_Log_Pos = None,
-				Relay_Master_Log_File = None,
-				Master_Log_File = None,
-				Read_Master_Log_Pos = None
+				Exec_Main_Log_Pos = None,
+				Relay_Main_Log_File = None,
+				Main_Log_File = None,
+				Read_Main_Log_Pos = None
 				)
 					
 		out = self.fetchdict("SHOW SLAVE STATUS")
-		LOG.debug('slave status: %s' % str(out))
+		LOG.debug('subordinate status: %s' % str(out))
 		if out:
 			for name, value in out.items():
 				if name in variables.keys():
 					variables[name] = value
 		else:
-			raise ServiceError('SHOW SLAVE STATUS returned empty set. Slave is not started?')
+			raise ServiceError('SHOW SLAVE STATUS returned empty set. Subordinate is not started?')
 		return variables
 	
 	
-	def master_status(self):
+	def main_status(self):
 		out = self.fetchdict('SHOW MASTER STATUS')
 		log_file, log_pos = None, None
 		if out:
@@ -311,7 +311,7 @@ class MySQLClient(object):
 		return (log_file, log_pos)
 	
 	
-	def reset_master(self):
+	def reset_main(self):
 		return self.fetchone("RESET MASTER")
 	
 	
@@ -578,7 +578,7 @@ class RepicationWatcher(threading.Thread):
 	
 	_state = None
 	_client = None
-	_master_host = None
+	_main_host = None
 	_repl_user = None
 	_repl_password = None
 	
@@ -588,15 +588,15 @@ class RepicationWatcher(threading.Thread):
 	TIMEOUT = 60
 	
 	
-	def __init__(self, client, master_host, repl_user, repl_password):
+	def __init__(self, client, main_host, repl_user, repl_password):
 		super(RepicationWatcher, self).__init__()
 		self._client = client
-		self.change_master_host(master_host, repl_user, repl_password)
+		self.change_main_host(main_host, repl_user, repl_password)
 	
 	
-	def change_master_host(self, host, user, password):
+	def change_main_host(self, host, user, password):
 		self.suspend()
-		self._master_host = host
+		self._main_host = host
 		self._repl_user	= user
 		self._repl_password = password
 		self.resume()
@@ -608,25 +608,25 @@ class RepicationWatcher(threading.Thread):
 			if self._state == self.WATCHER_RUNNING:
 				r_status = None
 				try:
-					r_status = self._client.slave_status()
+					r_status = self._client.subordinate_status()
 				except ServiceError, e:
 					LOG.error(e)
 					
 				if not r_status:
 					time.sleep(self.TIMEOUT)
 				
-				elif r_status['Slave_IO_Running'] == 'Yes' and r_status['Slave_SQL_Running'] == 'Yes':
+				elif r_status['Subordinate_IO_Running'] == 'Yes' and r_status['Subordinate_SQL_Running'] == 'Yes':
 					time.sleep(self.TIMEOUT)
 				
-				elif r_status and r_status['Slave_SQL_Running'] == 'No' and \
+				elif r_status and r_status['Subordinate_SQL_Running'] == 'No' and \
 							'Relay log read failure: Could not parse relay log event entry' in r_status['Last_Error']:
-					self.repair_relaylog(r_status['Relay_Master_Log_File'], r_status['Exec_Master_Log_Pos'])
+					self.repair_relaylog(r_status['Relay_Main_Log_File'], r_status['Exec_Main_Log_Pos'])
 					time.sleep(self.TIMEOUT)
 				else:
 					self.suspend()
-					msg = 'Replication is broken. Slave_IO_Running=%s, Slave_SQL_Running=%s, Last_Error=%s' % (
-									r_status['Slave_IO_Running'], 
-									r_status['Slave_SQL_Running'],
+					msg = 'Replication is broken. Subordinate_IO_Running=%s, Subordinate_SQL_Running=%s, Last_Error=%s' % (
+									r_status['Subordinate_IO_Running'], 
+									r_status['Subordinate_SQL_Running'],
 									r_status['Last_Error']
 									)
 					LOG.error(msg)
@@ -634,10 +634,10 @@ class RepicationWatcher(threading.Thread):
 	def repair_relaylog(self, log_file, log_pos):
 		LOG.info('Repairing relay log')
 		try:
-			self._client.stop_slave()
-			self._client.reset_slave()
-			self._client.change_master_to(self._master_host, self._repl_user, self._repl_password, log_file, log_pos)
-			self._client.sart_slave()
+			self._client.stop_subordinate()
+			self._client.reset_subordinate()
+			self._client.change_main_to(self._main_host, self._repl_user, self._repl_password, log_file, log_pos)
+			self._client.sart_subordinate()
 		except BaseException, e:
 			self.suspend()
 			LOG.error(e)

@@ -302,7 +302,7 @@ for behavior in ('mysql', 'mysql2', 'percona'):
 		'volume,volume_config': 
 				Json('%s/storage/%s.json' % (private_dir, 'mysql'), 
 					'scalarizr.storage2.volume'),
-		'*_password,log_*,replication_master': 
+		'*_password,log_*,replication_main': 
 				Ini('%s/%s.ini' % (private_dir, behavior), section),
 		'mysqldump_options': 
 				Ini('%s/%s.ini' % (public_dir, behavior), section)
